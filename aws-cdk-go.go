@@ -1,70 +1,93 @@
 package main
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+
 	"github.com/aws/aws-cdk-go/awscdk/v2"
-	// "github.com/aws/aws-cdk-go/awscdk/v2/awssqs"
-	"github.com/aws/constructs-go/constructs/v10"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awsappsync"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awscognito"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awsdynamodb"
+	"github.com/aws/aws-cdk-go/awscdk/v2/awsiam"
 	"github.com/aws/jsii-runtime-go"
 )
 
-type AwsCdkGoStackProps struct {
-	awscdk.StackProps
-}
-
-func NewAwsCdkGoStack(scope constructs.Construct, id string, props *AwsCdkGoStackProps) awscdk.Stack {
-	var sprops awscdk.StackProps
-	if props != nil {
-		sprops = props.StackProps
-	}
-	stack := awscdk.NewStack(scope, &id, &sprops)
-
-	// The code that defines your stack goes here
-
-	// example resource
-	// queue := awssqs.NewQueue(stack, jsii.String("AwsCdkGoQueue"), &awssqs.QueueProps{
-	// 	VisibilityTimeout: awscdk.Duration_Seconds(jsii.Number(300)),
-	// })
-
-	return stack
-}
-
 func main() {
-	defer jsii.Close()
-
 	app := awscdk.NewApp(nil)
+	stack := awscdk.NewStack(app, jsii.String("AwsCdkGo"), &awscdk.StackProps{})
 
-	NewAwsCdkGoStack(app, "AwsCdkGoStack", &AwsCdkGoStackProps{
-		awscdk.StackProps{
-			Env: env(),
-		},
+	//認証用のCogintoユーザープールの作成
+	awscognito.NewUserPool(stack, jsii.String("UserPool"), &awscognito.UserPoolProps{
+		UserPoolName: jsii.String("app-userpool"),
 	})
 
+	api := awsappsync.NewCfnGraphQLApi(stack, jsii.String("BooksApi"), &awsappsync.CfnGraphQLApiProps{
+		Name:               jsii.String("books-api"),
+		AuthenticationType: jsii.String("API_KEY"),
+	})
+	awsappsync.NewCfnApiKey(stack, jsii.String("BooksApiKey"), &awsappsync.CfnApiKeyProps{
+		ApiId: api.AttrApiId(),
+	})
+	table := awsdynamodb.NewTable(stack, jsii.String("demo-table"), &awsdynamodb.TableProps{
+		TableName: jsii.String("booktable"),
+		PartitionKey: &awsdynamodb.Attribute{
+			Name: jsii.String("id"),
+			Type: awsdynamodb.AttributeType_STRING,
+		},
+		BillingMode: awsdynamodb.BillingMode_PAY_PER_REQUEST,
+		Stream:      awsdynamodb.StreamViewType_NEW_IMAGE,
+	})
+	tablerole := awsiam.NewRole(stack, jsii.String("dynamodb-role"), &awsiam.RoleProps{
+		AssumedBy: awsiam.NewServicePrincipal(jsii.String("appsync.amazonaws.com"), &awsiam.ServicePrincipalOpts{}),
+	})
+	tablerole.AddManagedPolicy(awsiam.ManagedPolicy_FromAwsManagedPolicyName(jsii.String("AmazonDynamoDBFullAccess")))
+	Ds := awsappsync.NewCfnDataSource(stack, jsii.String("DataStore"), &awsappsync.CfnDataSourceProps{
+		ApiId: api.AttrApiId(),
+		Name:  jsii.String("BookDataSource"),
+		Type:  jsii.String("AMAZON_DYNAMODB"),
+		DynamoDbConfig: awsappsync.CfnDataSource_DynamoDBConfigProperty{
+			TableName: table.TableName(),
+			AwsRegion: stack.Region(),
+		},
+		ServiceRoleArn: tablerole.RoleArn(),
+	})
+	def, err := os.ReadFile(filepath.Join(".", "resource", "schema.graphql"))
+	if err != nil {
+		fmt.Println("failed to load graphql definition " + err.Error())
+	}
+
+	schema := awsappsync.NewCfnGraphQLSchema(stack, jsii.String("GraphSchema"), &awsappsync.CfnGraphQLSchemaProps{
+		ApiId:      api.AttrApiId(),
+		Definition: jsii.String(string(def)),
+	})
+
+	getitem, err := os.ReadFile(filepath.Join(".", "resource", "getitem.vtl"))
+	if err != nil {
+		fmt.Println("failed to load  getitem.vtl " + err.Error())
+	}
+	putitem, err := os.ReadFile(filepath.Join(".", "resource", "putitem.vtl"))
+	if err != nil {
+		fmt.Println("failed to load  putitem.vtl " + err.Error())
+	}
+
+	awsappsync.NewCfnResolver(stack, jsii.String("GetResolver"), &awsappsync.CfnResolverProps{
+		ApiId:                   api.AttrApiId(),
+		TypeName:                jsii.String("Query"),
+		FieldName:               jsii.String("getPost"),
+		DataSourceName:          Ds.Name(),
+		RequestMappingTemplate:  jsii.String(string(getitem)),
+		ResponseMappingTemplate: jsii.String(`$util.toJson($ctx.result)`),
+	}).AddDependency(schema)
+
+	awsappsync.NewCfnResolver(stack, jsii.String("AddResolver"), &awsappsync.CfnResolverProps{
+		ApiId:                   api.AttrApiId(),
+		TypeName:                jsii.String("Mutation"),
+		FieldName:               jsii.String("addPost"),
+		DataSourceName:          Ds.Name(),
+		RequestMappingTemplate:  jsii.String(string(putitem)),
+		ResponseMappingTemplate: jsii.String(`$util.toJson($ctx.result)`),
+	}).AddDependency(schema)
 	app.Synth(nil)
-}
 
-// env determines the AWS environment (account+region) in which our stack is to
-// be deployed. For more information see: https://docs.aws.amazon.com/cdk/latest/guide/environments.html
-func env() *awscdk.Environment {
-	// If unspecified, this stack will be "environment-agnostic".
-	// Account/Region-dependent features and context lookups will not work, but a
-	// single synthesized template can be deployed anywhere.
-	//---------------------------------------------------------------------------
-	return nil
-
-	// Uncomment if you know exactly what account and region you want to deploy
-	// the stack to. This is the recommendation for production stacks.
-	//---------------------------------------------------------------------------
-	// return &awscdk.Environment{
-	//  Account: jsii.String("123456789012"),
-	//  Region:  jsii.String("us-east-1"),
-	// }
-
-	// Uncomment to specialize this stack for the AWS Account and Region that are
-	// implied by the current CLI configuration. This is recommended for dev
-	// stacks.
-	//---------------------------------------------------------------------------
-	// return &awscdk.Environment{
-	//  Account: jsii.String(os.Getenv("CDK_DEFAULT_ACCOUNT")),
-	//  Region:  jsii.String(os.Getenv("CDK_DEFAULT_REGION")),
-	// }
 }
