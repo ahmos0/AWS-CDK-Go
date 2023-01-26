@@ -17,7 +17,6 @@ func main() {
 	app := awscdk.NewApp(nil)
 	stack := awscdk.NewStack(app, jsii.String("AwsCdkGo"), &awscdk.StackProps{})
 
-	//認証用のCogintoユーザープールの作成
 	awscognito.NewUserPool(stack, jsii.String("UserPool"), &awscognito.UserPoolProps{
 		UserPoolName: jsii.String("app-userpool"),
 	})
